@@ -99,6 +99,17 @@ class Storage:
           created_at TEXT NOT NULL,
           FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS process_specs(
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL UNIQUE,
+          project TEXT NOT NULL DEFAULT '',
+          machine TEXT NOT NULL DEFAULT '',
+          cwd TEXT NOT NULL,
+          argv_json TEXT NOT NULL,
+          readback_json TEXT NOT NULL DEFAULT '[]',
+          enabled INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
         CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
           entity_type, entity_id UNINDEXED, title, body, project, machine);
         """)

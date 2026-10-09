@@ -1,0 +1,61 @@
+{
+  "processes": [
+    {
+      "name": "oportunidades-vivas",
+      "project": "RUTAS_TRABAJO",
+      "machine": "LAPTOP-QD8KN4FS",
+      "cwd": "C:\\Users\\inmob\\Desktop\\RUTAS TRABAJO",
+      "argv": [
+        "python",
+        "ejecutor_oportunidades_en_vivo.py"
+      ],
+      "readback": [
+        {
+          "kind": "path_nonempty",
+          "path": "C:\\Users\\inmob\\Desktop\\RUTAS TRABAJO\\OPORTUNIDADES_VIVAS_AUDITADAS.json"
+        },
+        {
+          "kind": "path_nonempty",
+          "path": "C:\\Users\\inmob\\Desktop\\RUTAS TRABAJO\\INFORME_EJECUTIVO_OPORTUNIDADES_VIVAS.md"
+        }
+      ],
+      "enabled": false
+    },
+    {
+      "name": "pay-steel",
+      "project": "PICHILEMUAYUDA",
+      "machine": "LAPTOP-QD8KN4FS",
+      "cwd": "C:\\Users\\inmob\\Desktop\\PichilemuAyuda-PROXIMA",
+      "argv": [
+        "cmd.exe",
+        "/c",
+        "RUN_PAY_STEEL.cmd"
+      ],
+      "readback": [
+        {
+          "kind": "path_nonempty",
+          "path": "C:\\Users\\inmob\\Desktop\\PichilemuAyuda-PROXIMA\\pay-steel.log"
+        }
+      ],
+      "enabled": false
+    },
+    {
+      "name": "pay-web-3220",
+      "project": "PICHILEMUAYUDA",
+      "machine": "LAPTOP-QD8KN4FS",
+      "cwd": "C:\\Users\\inmob\\Desktop\\PichilemuAyuda-PROXIMA",
+      "argv": [
+        "cmd.exe",
+        "/c",
+        "RUN_PAY_WEB_3220.cmd"
+      ],
+      "readback": [
+        {
+          "kind": "path_nonempty",
+          "path": "C:\\Users\\inmob\\Desktop\\PichilemuAyuda-PROXIMA\\pay-web-3220.log"
+        }
+      ],
+      "enabled": false
+    }
+  ]
+}

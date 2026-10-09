@@ -1,5 +1,6 @@
 import json, uuid
 import hashlib
+import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 from .schema import EVIDENCE_LEVELS
@@ -330,6 +331,105 @@ class WorkMemory:
                ORDER BY s.name,s.version""",(project,machine))]
         con.close(); return rows
 
+
+    def register_process(self,name,cwd,argv,project="",machine="",readback=None,enabled=False):
+        pid=self._id("proc"); now=utc_now(); readback=readback or []
+        con=self.storage.connect()
+        old=con.execute("SELECT * FROM process_specs WHERE name=?",(name,)).fetchone()
+        if old:
+            con.close(); return dict(old)
+        con.execute("INSERT INTO process_specs VALUES(?,?,?,?,?,?,?,?,?)",
+                    (pid,name,project,machine,str(cwd),json.dumps(argv,ensure_ascii=False),
+                     json.dumps(readback,ensure_ascii=False),1 if enabled else 0,now))
+        con.commit(); out=dict(con.execute("SELECT * FROM process_specs WHERE id=?",(pid,)).fetchone()); con.close()
+        return out
+
+    def get_process(self,process_id):
+        con=self.storage.connect(); row=con.execute("SELECT * FROM process_specs WHERE id=?",(process_id,)).fetchone(); con.close()
+        if not row: raise KeyError(process_id)
+        out=dict(row); out["argv"]=json.loads(out.pop("argv_json")); out["readback"]=json.loads(out.pop("readback_json"))
+        return out
+
+    def set_process_enabled(self,process_id,enabled):
+        con=self.storage.connect(); cur=con.execute("UPDATE process_specs SET enabled=? WHERE id=?",(1 if enabled else 0,process_id))
+        if cur.rowcount!=1:
+            con.close(); raise KeyError(process_id)
+        con.commit(); con.close()
+        return self.get_process(process_id)
+
+    def _run_process_command(self,spec,timeout_seconds):
+        return subprocess.run(
+            spec["argv"],cwd=spec["cwd"],capture_output=True,text=True,
+            encoding="utf-8",errors="replace",timeout=timeout_seconds,check=False
+        )
+
+    def _process_readback(self,spec):
+        checks=[]
+        for item in spec["readback"]:
+            kind=item.get("kind")
+            path=item.get("path","")
+            if kind=="path_exists":
+                ok=Path(path).exists()
+                checks.append({"kind":kind,"path":path,"ok":ok})
+                continue
+            if kind=="path_nonempty":
+                q=Path(path); ok=q.exists() and q.stat().st_size>0
+                checks.append({"kind":kind,"path":path,"ok":ok})
+                continue
+            checks.append({"kind":kind,"ok":False,"error":"unsupported readback"})
+        return checks
+
+    def _record_process_timeout(self,task,session_id,timeout_seconds,exc):
+        stdout=(exc.stdout or "")[-4000:] if isinstance(exc.stdout,str) else ""
+        stderr=(exc.stderr or "")[-4000:] if isinstance(exc.stderr,str) else ""
+        details={"timeout":timeout_seconds,"stdout_tail":stdout,"stderr_tail":stderr}
+        self.add_event(task["id"],"PROCESS_TIMEOUT","EXECUTED","process timed out",session_id,details)
+        return {"task_id":task["id"],"status":"TIMEOUT",**details}
+
+    def execute_process(self,process_id,session_id,timeout_seconds=120,dry_run=False):
+        spec=self.get_process(process_id)
+        if dry_run:
+            return {"dry_run":True,"cwd":spec["cwd"],"argv":spec["argv"],"readback":spec["readback"],"enabled":bool(spec["enabled"])}
+        if not spec["enabled"]:
+            raise RuntimeError("process disabled")
+        task=self.create_task(
+            f"execute:{spec['name']}",f"Execute process {spec['name']}",
+            spec["project"],spec["machine"],session_id,"P1"
+        )["task"]
+        run_key=f"process:{process_id}:{task['id']}"
+        self.begin_side_effect(
+            task["id"],run_key,f"launch process {spec['name']}",session_id=session_id,
+            details={"cwd":spec["cwd"],"argv":spec["argv"]}
+        )
+        try:
+            completed=self._run_process_command(spec,timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            return self._record_process_timeout(task,session_id,timeout_seconds,exc)
+
+        details={"returncode":completed.returncode,"stdout_tail":completed.stdout[-4000:],"stderr_tail":completed.stderr[-4000:]}
+        self.record_side_effect_outcome(
+            task["id"],run_key,f"process exited {completed.returncode}",
+            session_id=session_id,details=details
+        )
+        checks=self._process_readback(spec)
+        observed=all(x["ok"] for x in checks) if checks else completed.returncode==0
+        self.reconcile_from_readback(task["id"],run_key,observed,{"checks":checks,"returncode":completed.returncode})
+        if observed and completed.returncode==0:
+            self.verify_e2e(task["id"],f"process {spec['name']} completed and read-back passed")
+        return {
+            "task_id":task["id"],"returncode":completed.returncode,"readback":checks,
+            "derived_state":self.get_task(task["id"])["task"]["derived_state"]
+        }
+
+    def import_process_catalog(self,catalog_path):
+        data=json.loads(Path(catalog_path).read_text(encoding="utf-8"))
+        imported=[]
+        for spec in data.get("processes",[]):
+            imported.append(self.register_process(
+                spec["name"],spec["cwd"],spec["argv"],spec.get("project",""),spec.get("machine",""),
+                spec.get("readback",[]),spec.get("enabled",False)))
+        return imported
+
     def unresolved_side_effects(self):
         con=self.storage.connect(); rows=[dict(x) for x in con.execute("SELECT * FROM side_effects WHERE status='INTENT_RECORDED'")]; con.close(); return rows
     def pending(self):
@@ -337,4 +437,4 @@ class WorkMemory:
     def search(self,q):
         con=self.storage.connect(); rows=[dict(x) for x in con.execute("SELECT entity_type,entity_id,title,body,project,machine FROM search_index WHERE search_index MATCH ?",(q,))]; con.close(); return rows
     def health(self):
-        con=self.storage.connect(); out={t:con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("sessions","tasks","events","side_effects","task_claims","handoffs","recovery_checks","skills","skill_activations")}; con.close(); return {"ok":True,**out}
+        con=self.storage.connect(); out={t:con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("sessions","tasks","events","side_effects","task_claims","handoffs","recovery_checks","skills","skill_activations","process_specs")}; con.close(); return {"ok":True,**out}
