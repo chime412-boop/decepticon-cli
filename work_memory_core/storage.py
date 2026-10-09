@@ -38,6 +38,16 @@ class Storage:
           outcome_event_id TEXT, reconciliation_event_id TEXT, status TEXT NOT NULL,
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
           FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS task_claims(
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          action TEXT NOT NULL,
+          previous_session_id TEXT,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+          FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
         CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
           entity_type, entity_id UNINDEXED, title, body, project, machine);
         """)

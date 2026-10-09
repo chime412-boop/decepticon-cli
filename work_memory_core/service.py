@@ -1,4 +1,5 @@
 import json, uuid
+from datetime import datetime, timezone
 from .schema import EVIDENCE_LEVELS
 from .storage import Storage, utc_now
 
@@ -70,6 +71,74 @@ class WorkMemory:
         con.execute("UPDATE sessions SET status=?,ended_at=?,heartbeat_at=? WHERE id=?",(state,now,now,session_id))
         con.execute("UPDATE tasks SET derived_state='ORPHANED',updated_at=? WHERE owner_session_id=? AND derived_state!='COMPLETED'",(now,session_id))
         con.commit(); con.close()
+
+    def heartbeat(self,session_id):
+        now=utc_now(); con=self.storage.connect()
+        cur=con.execute("UPDATE sessions SET heartbeat_at=?,status='ACTIVE' WHERE id=? AND ended_at IS NULL",(now,session_id))
+        if cur.rowcount != 1:
+            con.close(); raise KeyError(session_id)
+        con.commit(); con.close()
+        return self.get_session(session_id)
+
+    def get_session(self,session_id):
+        con=self.storage.connect()
+        row=con.execute("SELECT * FROM sessions WHERE id=?",(session_id,)).fetchone()
+        con.close()
+        if not row: raise KeyError(session_id)
+        return dict(row)
+
+    def refresh_session_states(self,active_seconds=900,now=None):
+        current=now or datetime.now(timezone.utc)
+        con=self.storage.connect(); changed=[]
+        for row in con.execute("SELECT * FROM sessions WHERE ended_at IS NULL"):
+            beat=datetime.fromisoformat(row["heartbeat_at"])
+            age=(current-beat).total_seconds()
+            state="ACTIVE" if age <= active_seconds else "IDLE"
+            if row["status"] != state:
+                con.execute("UPDATE sessions SET status=? WHERE id=?",(state,row["id"]))
+                changed.append({"session_id":row["id"],"from":row["status"],"to":state})
+        con.commit(); con.close()
+        return changed
+
+    def claim_task(self,task_id,session_id,force=False):
+        self.refresh_session_states()
+        con=self.storage.connect()
+        task=con.execute("SELECT * FROM tasks WHERE id=?",(task_id,)).fetchone()
+        session=con.execute("SELECT * FROM sessions WHERE id=?",(session_id,)).fetchone()
+        if not task or not session:
+            con.close(); raise KeyError(task_id if not task else session_id)
+        prev=task["owner_session_id"]
+        if prev and prev != session_id:
+            owner=con.execute("SELECT * FROM sessions WHERE id=?",(prev,)).fetchone()
+            if owner and owner["status"]=="ACTIVE" and not force:
+                con.close(); raise RuntimeError("task owned by active session")
+        action="CLAIM" if not prev else ("RECLAIM" if prev==session_id else "TAKEOVER")
+        now=utc_now()
+        con.execute("UPDATE tasks SET owner_session_id=?,updated_at=? WHERE id=?",(session_id,now,task_id))
+        con.execute("INSERT INTO task_claims(task_id,session_id,action,previous_session_id,created_at) VALUES(?,?,?,?,?)",
+                    (task_id,session_id,action,prev,now))
+        con.commit(); con.close()
+        return {"task_id":task_id,"session_id":session_id,"previous_session_id":prev,"action":action}
+
+    def catch_up_audit(self):
+        self.refresh_session_states()
+        con=self.storage.connect(); repaired=[]
+        sql=("SELECT t.id task_id,t.owner_session_id,s.status session_status,t.derived_state "
+             "FROM tasks t LEFT JOIN sessions s ON s.id=t.owner_session_id "
+             "WHERE t.owner_session_id IS NOT NULL AND t.derived_state!='COMPLETED'")
+        rows=con.execute(sql).fetchall()
+        now=utc_now()
+        for row in rows:
+            if row["session_status"] in ("ENDED","CRASHED","ORPHANED") and row["derived_state"]!="ORPHANED":
+                con.execute("UPDATE tasks SET derived_state='ORPHANED',updated_at=? WHERE id=?",(now,row["task_id"]))
+                repaired.append({"task_id":row["task_id"],"owner_session_id":row["owner_session_id"],"owner_status":row["session_status"]})
+        con.commit(); con.close()
+        return repaired
+
+    def list_claims(self,task_id):
+        con=self.storage.connect()
+        rows=[dict(x) for x in con.execute("SELECT * FROM task_claims WHERE task_id=? ORDER BY seq",(task_id,))]
+        con.close(); return rows
     def unresolved_side_effects(self):
         con=self.storage.connect(); rows=[dict(x) for x in con.execute("SELECT * FROM side_effects WHERE status='INTENT_RECORDED'")]; con.close(); return rows
     def pending(self):
@@ -77,4 +146,4 @@ class WorkMemory:
     def search(self,q):
         con=self.storage.connect(); rows=[dict(x) for x in con.execute("SELECT entity_type,entity_id,title,body,project,machine FROM search_index WHERE search_index MATCH ?",(q,))]; con.close(); return rows
     def health(self):
-        con=self.storage.connect(); out={t:con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("sessions","tasks","events","side_effects")}; con.close(); return {"ok":True,**out}
+        con=self.storage.connect(); out={t:con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("sessions","tasks","events","side_effects","task_claims")}; con.close(); return {"ok":True,**out}
