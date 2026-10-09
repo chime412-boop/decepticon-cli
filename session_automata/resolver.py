@@ -31,9 +31,38 @@ def _ready(provider, source, view, candidate=None, lease_id=None):
         out["profile"]=candidate
     return out
 
+def _failed(candidate, step, error):
+    return {"ok":False,"failure":{"profile":candidate["alias"],"step":step,"error":str(error)}}
+
 async def _probe_ready(a, provider, probe):
     view=await _call(probe,provider)
     return view if _usable(a,view) else None
+
+async def _try_recover(automata, provider, candidate, probe, recover, lease):
+    pid=candidate["id"]
+    recovered=await _call(recover,provider,candidate)
+    automata.record_attempt(provider,pid,"recover",bool(recovered and recovered.get("ok")),recovered or {})
+    view=await _probe_ready(automata,provider,probe)
+    if not view:
+        return None
+    automata.record_attempt(provider,pid,"probe",True,view)
+    return _ready(provider,"recover",view,candidate,lease)
+
+async def _try_launch(automata, provider, candidate, probe, recover, launch, lease):
+    pid=candidate["id"]
+    opened=await _call(launch,provider,candidate,PROVIDER_URLS[provider])
+    automata.record_attempt(provider,pid,"launch",bool(opened and opened.get("ok")),opened or {})
+    if not opened or not opened.get("ok"):
+        return _failed(candidate,"launch",(opened or {}).get("error") or "FAILED")
+
+    recovered=await _call(recover,provider,candidate)
+    automata.record_attempt(provider,pid,"recover_after_launch",bool(recovered and recovered.get("ok")),recovered or {})
+    view=await _probe_ready(automata,provider,probe)
+    if not view:
+        automata.record_attempt(provider,pid,"probe",False,{})
+        return _failed(candidate,"probe","VIEW_NOT_READY")
+    automata.record_attempt(provider,pid,"probe",True,view)
+    return _ready(provider,"launch_recover",view,candidate,lease)
 
 async def _attempt_candidate(
     automata: SessionAutomata,
@@ -45,40 +74,22 @@ async def _attempt_candidate(
     launch: MaybeAsync,
     lease_ttl: int,
 )->dict[str,Any]:
-    pid=candidate["id"]
-    lease=automata.acquire(provider,pid,owner,lease_ttl)
+    lease=automata.acquire(provider,candidate["id"],owner,lease_ttl)
     if not lease:
-        return {"ok":False,"failure":{"profile":candidate["alias"],"step":"lease","error":"BUSY"}}
-
+        return _failed(candidate,"lease","BUSY")
     try:
-        recovered=await _call(recover,provider,candidate)
-        automata.record_attempt(provider,pid,"recover",bool(recovered and recovered.get("ok")),recovered or {})
-        view=await _probe_ready(automata,provider,probe)
-        if view:
-            automata.record_attempt(provider,pid,"probe",True,view)
-            return _ready(provider,"recover",view,candidate,lease)
-
-        target=PROVIDER_URLS[provider]
-        opened=await _call(launch,provider,candidate,target)
-        automata.record_attempt(provider,pid,"launch",bool(opened and opened.get("ok")),opened or {})
-        if not opened or not opened.get("ok"):
-            automata.release(lease)
-            return {"ok":False,"failure":{"profile":candidate["alias"],"step":"launch","error":str((opened or {}).get("error") or "FAILED")}}
-
-        recovered=await _call(recover,provider,candidate)
-        automata.record_attempt(provider,pid,"recover_after_launch",bool(recovered and recovered.get("ok")),recovered or {})
-        view=await _probe_ready(automata,provider,probe)
-        if view:
-            automata.record_attempt(provider,pid,"probe",True,view)
-            return _ready(provider,"launch_recover",view,candidate,lease)
-
-        automata.record_attempt(provider,pid,"probe",False,{})
+        recovered=await _try_recover(automata,provider,candidate,probe,recover,lease)
+        if recovered:
+            return recovered
+        launched=await _try_launch(automata,provider,candidate,probe,recover,launch,lease)
+        if launched.get("ok"):
+            return launched
         automata.release(lease)
-        return {"ok":False,"failure":{"profile":candidate["alias"],"step":"probe","error":"VIEW_NOT_READY"}}
+        return launched
     except Exception as exc:
-        automata.record_attempt(provider,pid,"exception",False,{"error":f"{type(exc).__name__}:{exc}"})
+        automata.record_attempt(provider,candidate["id"],"exception",False,{"error":f"{type(exc).__name__}:{exc}"})
         automata.release(lease)
-        return {"ok":False,"failure":{"profile":candidate["alias"],"step":"exception","error":str(exc)}}
+        return _failed(candidate,"exception",exc)
 
 async def ensure_provider_view(
     automata: SessionAutomata,
@@ -106,5 +117,4 @@ async def ensure_provider_view(
         if result.get("ok"):
             return result
         failures.append(result["failure"])
-
     return {"ok":False,"provider":provider,"error":"NO_READY_PROVIDER_VIEW","failures":failures}
