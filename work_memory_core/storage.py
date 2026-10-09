@@ -79,6 +79,26 @@ class Storage:
           created_at TEXT NOT NULL,
           FOREIGN KEY(idempotency_key) REFERENCES side_effects(idempotency_key) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS skills(
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          version TEXT NOT NULL,
+          skill_path TEXT NOT NULL,
+          source_ref TEXT NOT NULL DEFAULT '',
+          content_sha256 TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(name,version)
+        );
+        CREATE TABLE IF NOT EXISTS skill_activations(
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          skill_id TEXT NOT NULL,
+          project TEXT NOT NULL DEFAULT '',
+          machine TEXT NOT NULL DEFAULT '',
+          active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE CASCADE
+        );
         CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
           entity_type, entity_id UNINDEXED, title, body, project, machine);
         """)

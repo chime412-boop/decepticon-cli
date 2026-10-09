@@ -1,0 +1,20 @@
+name: phase5-skill-registry
+on:
+  push:
+    branches: [main, "feature/**", "lab/**"]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ["3.11","3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m compileall work_memory_core tests
+      - run: python -m unittest discover -s tests -v
+      - run: python -m work_memory_core.cli --root .runtime health

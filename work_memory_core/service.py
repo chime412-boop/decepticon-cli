@@ -1,4 +1,6 @@
 import json, uuid
+import hashlib
+from pathlib import Path
 from datetime import datetime, timezone
 from .schema import EVIDENCE_LEVELS
 from .storage import Storage, utc_now
@@ -272,6 +274,62 @@ class WorkMemory:
             "recent_events":list(reversed(events)),
         }
 
+
+    def register_skill(self,skill_path,name,version="1.0.0",source_ref="",verified=False):
+        path=Path(skill_path); manifest=path/"SKILL.md"
+        if not manifest.is_file():
+            raise ValueError("SKILL.md missing")
+        content=manifest.read_bytes()
+        digest=hashlib.sha256(content).hexdigest()
+        sid=self._id("skill"); now=utc_now(); status="VERIFIED" if verified else "UNVERIFIED"
+        con=self.storage.connect()
+        old=con.execute("SELECT id,content_sha256,status FROM skills WHERE name=? AND version=?",(name,version)).fetchone()
+        if old:
+            if old["content_sha256"] != digest:
+                con.close(); raise RuntimeError("skill version content changed; bump version")
+            con.close()
+            return self.get_skill(old["id"])
+        con.execute("INSERT INTO skills VALUES(?,?,?,?,?,?,?,?)",
+                    (sid,name,version,str(path),source_ref,digest,status,now))
+        con.commit(); con.close()
+        return self.get_skill(sid)
+
+    def get_skill(self,skill_id):
+        con=self.storage.connect(); row=con.execute("SELECT * FROM skills WHERE id=?",(skill_id,)).fetchone(); con.close()
+        if not row: raise KeyError(skill_id)
+        return dict(row)
+
+    def verify_skill(self,skill_id):
+        skill=self.get_skill(skill_id)
+        manifest=Path(skill["skill_path"])/"SKILL.md"
+        if not manifest.is_file(): raise RuntimeError("skill disappeared")
+        digest=hashlib.sha256(manifest.read_bytes()).hexdigest()
+        if digest != skill["content_sha256"]: raise RuntimeError("skill content changed after registration")
+        con=self.storage.connect(); con.execute("UPDATE skills SET status='VERIFIED' WHERE id=?",(skill_id,)); con.commit(); con.close()
+        return self.get_skill(skill_id)
+
+    def activate_skill(self,skill_id,project="",machine=""):
+        skill=self.get_skill(skill_id)
+        if skill["status"]!="VERIFIED":
+            raise RuntimeError("unverified skill cannot be activated")
+        con=self.storage.connect()
+        existing=con.execute("SELECT seq FROM skill_activations WHERE skill_id=? AND project=? AND machine=? AND active=1",
+                             (skill_id,project,machine)).fetchone()
+        if not existing:
+            con.execute("INSERT INTO skill_activations(skill_id,project,machine,active,created_at) VALUES(?,?,?,?,?)",
+                        (skill_id,project,machine,1,utc_now()))
+            con.commit()
+        con.close()
+        return {"active":True,"skill_id":skill_id,"project":project,"machine":machine}
+
+    def active_skills(self,project="",machine=""):
+        con=self.storage.connect()
+        rows=[dict(x) for x in con.execute(
+            """SELECT s.* FROM skills s JOIN skill_activations a ON a.skill_id=s.id
+               WHERE a.active=1 AND s.status='VERIFIED' AND a.project=? AND a.machine=?
+               ORDER BY s.name,s.version""",(project,machine))]
+        con.close(); return rows
+
     def unresolved_side_effects(self):
         con=self.storage.connect(); rows=[dict(x) for x in con.execute("SELECT * FROM side_effects WHERE status='INTENT_RECORDED'")]; con.close(); return rows
     def pending(self):
@@ -279,4 +337,4 @@ class WorkMemory:
     def search(self,q):
         con=self.storage.connect(); rows=[dict(x) for x in con.execute("SELECT entity_type,entity_id,title,body,project,machine FROM search_index WHERE search_index MATCH ?",(q,))]; con.close(); return rows
     def health(self):
-        con=self.storage.connect(); out={t:con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("sessions","tasks","events","side_effects","task_claims","handoffs","recovery_checks")}; con.close(); return {"ok":True,**out}
+        con=self.storage.connect(); out={t:con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("sessions","tasks","events","side_effects","task_claims","handoffs","recovery_checks","skills","skill_activations")}; con.close(); return {"ok":True,**out}
