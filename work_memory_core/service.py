@@ -430,6 +430,78 @@ class WorkMemory:
                 spec.get("readback",[]),spec.get("enabled",False)))
         return imported
 
+
+    def _create_alert(self,kind,severity,message,session_id=None,task_id=None,details=None):
+        aid=self._id("alert"); con=self.storage.connect()
+        con.execute("INSERT INTO alerts VALUES(?,?,?,?,?,?,?,0,?)",
+                    (aid,kind,severity,session_id,task_id,message,
+                     json.dumps(details or {},ensure_ascii=False),utc_now()))
+        con.commit(); con.close()
+        return aid
+
+    def supervisor_tick(self,active_seconds=900,crash_seconds=3600,now=None):
+        current=now or datetime.now(timezone.utc)
+        con=self.storage.connect(); transitions=[]; crashes=[]
+        rows=con.execute("SELECT * FROM sessions WHERE ended_at IS NULL").fetchall()
+        for row in rows:
+            beat=datetime.fromisoformat(row["heartbeat_at"])
+            age=(current-beat).total_seconds()
+            if age <= active_seconds:
+                target="ACTIVE"
+            elif age <= crash_seconds:
+                target="IDLE"
+            else:
+                target="CRASHED"
+            if row["status"]==target:
+                continue
+            if target=="CRASHED":
+                con.execute("UPDATE sessions SET status='CRASHED',ended_at=? WHERE id=?",(current.isoformat(),row["id"]))
+                owned=con.execute(
+                    "SELECT id FROM tasks WHERE owner_session_id=? AND derived_state!='COMPLETED'",
+                    (row["id"],)
+                ).fetchall()
+                for task in owned:
+                    con.execute("UPDATE tasks SET derived_state='ORPHANED',updated_at=? WHERE id=?",
+                                (current.isoformat(),task["id"]))
+                    crashes.append({"session_id":row["id"],"task_id":task["id"],"age_seconds":age})
+            else:
+                con.execute("UPDATE sessions SET status=? WHERE id=?",(target,row["id"]))
+            transitions.append({"session_id":row["id"],"from":row["status"],"to":target,"age_seconds":age})
+        con.commit(); con.close()
+        for item in crashes:
+            self._create_alert(
+                "ORPHANED_WORK","P0","Session heartbeat expired; unfinished work orphaned",
+                item["session_id"],item["task_id"],{"age_seconds":item["age_seconds"]}
+            )
+        return {"transitions":transitions,"orphaned":crashes}
+
+    def list_alerts(self,unacknowledged_only=True):
+        con=self.storage.connect()
+        sql="SELECT * FROM alerts"
+        if unacknowledged_only:
+            sql+=" WHERE acknowledged=0"
+        sql+=" ORDER BY created_at DESC"
+        rows=[dict(x) for x in con.execute(sql)]
+        con.close()
+        for row in rows:
+            row["details"]=json.loads(row.pop("details_json"))
+        return rows
+
+    def acknowledge_alert(self,alert_id):
+        con=self.storage.connect(); cur=con.execute("UPDATE alerts SET acknowledged=1 WHERE id=?",(alert_id,))
+        if cur.rowcount!=1:
+            con.close(); raise KeyError(alert_id)
+        con.commit(); con.close()
+        return {"acknowledged":True,"alert_id":alert_id}
+
+    def status_snapshot(self,project="",machine=""):
+        return {
+            "health":self.health(),
+            "context":self.context_bundle(project,machine,limit_events=8),
+            "alerts":self.list_alerts(),
+            "recovery":self.recovery_plan(),
+        }
+
     def unresolved_side_effects(self):
         con=self.storage.connect(); rows=[dict(x) for x in con.execute("SELECT * FROM side_effects WHERE status='INTENT_RECORDED'")]; con.close(); return rows
     def pending(self):
@@ -437,4 +509,4 @@ class WorkMemory:
     def search(self,q):
         con=self.storage.connect(); rows=[dict(x) for x in con.execute("SELECT entity_type,entity_id,title,body,project,machine FROM search_index WHERE search_index MATCH ?",(q,))]; con.close(); return rows
     def health(self):
-        con=self.storage.connect(); out={t:con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("sessions","tasks","events","side_effects","task_claims","handoffs","recovery_checks","skills","skill_activations","process_specs")}; con.close(); return {"ok":True,**out}
+        con=self.storage.connect(); out={t:con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("sessions","tasks","events","side_effects","task_claims","handoffs","recovery_checks","skills","skill_activations","process_specs","alerts")}; con.close(); return {"ok":True,**out}

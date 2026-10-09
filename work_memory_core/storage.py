@@ -110,6 +110,19 @@ class Storage:
           enabled INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS alerts(
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          severity TEXT NOT NULL,
+          session_id TEXT,
+          task_id TEXT,
+          message TEXT NOT NULL,
+          details_json TEXT NOT NULL DEFAULT '{}',
+          acknowledged INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE SET NULL,
+          FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE SET NULL
+        );
         CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
           entity_type, entity_id UNINDEXED, title, body, project, machine);
         """)
