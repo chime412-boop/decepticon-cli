@@ -66,6 +66,68 @@ class WorkMemory:
         ev=self.add_event(task_id,"RECONCILED","RECONCILED",summary,idempotency_key=idempotency_key)
         con=self.storage.connect(); con.execute("UPDATE side_effects SET reconciliation_event_id=?,status='RECONCILED',updated_at=? WHERE idempotency_key=?",(ev["event_id"],utc_now(),idempotency_key)); con.commit(); con.close(); return ev
     def verify_e2e(self,task_id,summary): return self.add_event(task_id,"VERIFIED_E2E","VERIFIED_E2E",summary)
+
+    def recovery_plan(self):
+        con=self.storage.connect()
+        rows=[dict(x) for x in con.execute(
+            "SELECT * FROM side_effects WHERE status IN ('INTENT_RECORDED','SAFE_TO_RETRY','RETRY_AUTHORIZED') ORDER BY created_at"
+        )]
+        con.close()
+        plan=[]
+        for row in rows:
+            action="READBACK_REQUIRED" if row["status"]=="INTENT_RECORDED" else "RETRY_ALLOWED"
+            plan.append({**row,"next_action":action})
+        return plan
+
+    def reconcile_from_readback(self,task_id,idempotency_key,observed,details=None):
+        con=self.storage.connect()
+        side=con.execute("SELECT * FROM side_effects WHERE idempotency_key=?",(idempotency_key,)).fetchone()
+        if not side:
+            con.close(); raise KeyError(idempotency_key)
+        now=utc_now(); details=details or {}
+        if observed is True:
+            decision="EFFECT_CONFIRMED"
+        elif observed is False:
+            decision="SAFE_TO_RETRY"
+        else:
+            decision="UNKNOWN"
+        con.execute("INSERT INTO recovery_checks(idempotency_key,observed,decision,details_json,created_at) VALUES(?,?,?,?,?)",
+                    (idempotency_key,None if observed is None else int(observed),decision,json.dumps(details,ensure_ascii=False),now))
+        if decision=="SAFE_TO_RETRY":
+            con.execute("UPDATE side_effects SET status='SAFE_TO_RETRY',updated_at=? WHERE idempotency_key=?",(now,idempotency_key))
+            con.commit(); con.close()
+            return {"decision":decision,"idempotency_key":idempotency_key}
+        if decision=="UNKNOWN":
+            con.commit(); con.close()
+            return {"decision":decision,"idempotency_key":idempotency_key}
+        con.commit(); con.close()
+
+        if not side["outcome_event_id"]:
+            self.record_side_effect_outcome(task_id,idempotency_key,"effect confirmed by read-back",details=details)
+        self.reconcile_side_effect(task_id,idempotency_key,"read-back reconciled external effect")
+        return {"decision":decision,"idempotency_key":idempotency_key}
+
+    def authorize_retry(self,task_id,idempotency_key,summary="retry authorized after negative read-back"):
+        con=self.storage.connect()
+        side=con.execute("SELECT * FROM side_effects WHERE idempotency_key=?",(idempotency_key,)).fetchone()
+        con.close()
+        if not side: raise KeyError(idempotency_key)
+        if side["status"]!="SAFE_TO_RETRY":
+            raise RuntimeError("retry not safe")
+        event=self.add_event(task_id,"SIDE_EFFECT_RETRY_INTENT","SIDE_EFFECT_INTENT",summary,idempotency_key=None)
+        con=self.storage.connect()
+        con.execute("UPDATE side_effects SET status='RETRY_AUTHORIZED',updated_at=? WHERE idempotency_key=?",(utc_now(),idempotency_key))
+        con.commit(); con.close()
+        return {"authorized":True,"event_id":event["event_id"],"idempotency_key":idempotency_key}
+
+    def list_recovery_checks(self,idempotency_key):
+        con=self.storage.connect()
+        rows=[dict(x) for x in con.execute("SELECT * FROM recovery_checks WHERE idempotency_key=? ORDER BY seq",(idempotency_key,))]
+        con.close()
+        for row in rows:
+            row["details"]=json.loads(row.pop("details_json"))
+        return rows
+
     def end_session(self,session_id,crashed=False):
         now=utc_now(); state="CRASHED" if crashed else "ENDED"; con=self.storage.connect()
         con.execute("UPDATE sessions SET status=?,ended_at=?,heartbeat_at=? WHERE id=?",(state,now,now,session_id))
@@ -217,4 +279,4 @@ class WorkMemory:
     def search(self,q):
         con=self.storage.connect(); rows=[dict(x) for x in con.execute("SELECT entity_type,entity_id,title,body,project,machine FROM search_index WHERE search_index MATCH ?",(q,))]; con.close(); return rows
     def health(self):
-        con=self.storage.connect(); out={t:con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("sessions","tasks","events","side_effects","task_claims","handoffs")}; con.close(); return {"ok":True,**out}
+        con=self.storage.connect(); out={t:con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("sessions","tasks","events","side_effects","task_claims","handoffs","recovery_checks")}; con.close(); return {"ok":True,**out}

@@ -70,6 +70,15 @@ class Storage:
           FOREIGN KEY(from_session_id) REFERENCES sessions(id) ON DELETE SET NULL,
           FOREIGN KEY(to_session_id) REFERENCES sessions(id) ON DELETE SET NULL
         );
+        CREATE TABLE IF NOT EXISTS recovery_checks(
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          idempotency_key TEXT NOT NULL,
+          observed INTEGER,
+          decision TEXT NOT NULL,
+          details_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(idempotency_key) REFERENCES side_effects(idempotency_key) ON DELETE CASCADE
+        );
         CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
           entity_type, entity_id UNINDEXED, title, body, project, machine);
         """)
