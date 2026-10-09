@@ -48,6 +48,28 @@ class Storage:
           FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
           FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS handoffs(
+          id TEXT PRIMARY KEY,
+          task_id TEXT,
+          from_session_id TEXT,
+          to_session_id TEXT,
+          project TEXT NOT NULL DEFAULT '',
+          machine TEXT NOT NULL DEFAULT '',
+          objective TEXT NOT NULL,
+          status TEXT NOT NULL,
+          next_action TEXT NOT NULL DEFAULT '',
+          blocked_on TEXT NOT NULL DEFAULT '',
+          ruled_out_json TEXT NOT NULL DEFAULT '[]',
+          files_json TEXT NOT NULL DEFAULT '[]',
+          commands_json TEXT NOT NULL DEFAULT '[]',
+          results_json TEXT NOT NULL DEFAULT '[]',
+          errors_json TEXT NOT NULL DEFAULT '[]',
+          evidence_json TEXT NOT NULL DEFAULT '[]',
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE SET NULL,
+          FOREIGN KEY(from_session_id) REFERENCES sessions(id) ON DELETE SET NULL,
+          FOREIGN KEY(to_session_id) REFERENCES sessions(id) ON DELETE SET NULL
+        );
         CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
           entity_type, entity_id UNINDEXED, title, body, project, machine);
         """)

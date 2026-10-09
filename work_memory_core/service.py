@@ -139,6 +139,77 @@ class WorkMemory:
         con=self.storage.connect()
         rows=[dict(x) for x in con.execute("SELECT * FROM task_claims WHERE task_id=? ORDER BY seq",(task_id,))]
         con.close(); return rows
+
+    def create_handoff(self,task_id,from_session_id,objective,status,next_action="",blocked_on="",
+                       ruled_out=None,files=None,commands=None,results=None,errors=None,evidence=None,
+                       to_session_id=None):
+        task=self.get_task(task_id)["task"]
+        hid=self._id("handoff"); now=utc_now()
+        payload={
+            "ruled_out": ruled_out or [],
+            "files": files or [],
+            "commands": commands or [],
+            "results": results or [],
+            "errors": errors or [],
+            "evidence": evidence or [],
+        }
+        con=self.storage.connect()
+        con.execute("""INSERT INTO handoffs(
+            id,task_id,from_session_id,to_session_id,project,machine,objective,status,next_action,blocked_on,
+            ruled_out_json,files_json,commands_json,results_json,errors_json,evidence_json,created_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (hid,task_id,from_session_id,to_session_id,task["project"],task["machine"],objective,status,next_action,blocked_on,
+         json.dumps(payload["ruled_out"],ensure_ascii=False),json.dumps(payload["files"],ensure_ascii=False),
+         json.dumps(payload["commands"],ensure_ascii=False),json.dumps(payload["results"],ensure_ascii=False),
+         json.dumps(payload["errors"],ensure_ascii=False),json.dumps(payload["evidence"],ensure_ascii=False),now))
+        con.execute("UPDATE tasks SET next_action=?,blocked_on=?,updated_at=? WHERE id=?",(next_action,blocked_on,now,task_id))
+        con.commit(); con.close()
+        return self.get_handoff(hid)
+
+    def get_handoff(self,handoff_id):
+        con=self.storage.connect(); row=con.execute("SELECT * FROM handoffs WHERE id=?",(handoff_id,)).fetchone(); con.close()
+        if not row: raise KeyError(handoff_id)
+        out=dict(row)
+        for key in ("ruled_out","files","commands","results","errors","evidence"):
+            out[key]=json.loads(out.pop(key+"_json"))
+        return out
+
+    def latest_handoff(self,project="",machine=""):
+        con=self.storage.connect()
+        clauses=[]; params=[]
+        if project: clauses.append("project=?"); params.append(project)
+        if machine: clauses.append("machine=?"); params.append(machine)
+        sql="SELECT id FROM handoffs"
+        if clauses: sql+=" WHERE "+" AND ".join(clauses)
+        sql+=" ORDER BY created_at DESC LIMIT 1"
+        row=con.execute(sql,params).fetchone(); con.close()
+        return self.get_handoff(row["id"]) if row else None
+
+    def context_bundle(self,project="",machine="",limit_events=12):
+        self.refresh_session_states()
+        con=self.storage.connect()
+        params=[]; where=[]
+        if project: where.append("project=?"); params.append(project)
+        if machine: where.append("machine=?"); params.append(machine)
+        task_sql="SELECT * FROM tasks"
+        if where: task_sql+=" WHERE "+" AND ".join(where)
+        task_sql+=" ORDER BY updated_at DESC LIMIT 20"
+        tasks=[dict(x) for x in con.execute(task_sql,params)]
+        session_sql="SELECT * FROM sessions"
+        if where: session_sql+=" WHERE "+" AND ".join(where)
+        session_sql+=" ORDER BY heartbeat_at DESC LIMIT 20"
+        sessions=[dict(x) for x in con.execute(session_sql,params)]
+        events=[dict(x) for x in con.execute("SELECT * FROM events ORDER BY seq DESC LIMIT ?",(limit_events,))]
+        con.close()
+        return {
+            "project":project,
+            "machine":machine,
+            "pending":[x for x in tasks if x["derived_state"]!="COMPLETED"],
+            "sessions":sessions,
+            "latest_handoff":self.latest_handoff(project,machine),
+            "recent_events":list(reversed(events)),
+        }
+
     def unresolved_side_effects(self):
         con=self.storage.connect(); rows=[dict(x) for x in con.execute("SELECT * FROM side_effects WHERE status='INTENT_RECORDED'")]; con.close(); return rows
     def pending(self):
@@ -146,4 +217,4 @@ class WorkMemory:
     def search(self,q):
         con=self.storage.connect(); rows=[dict(x) for x in con.execute("SELECT entity_type,entity_id,title,body,project,machine FROM search_index WHERE search_index MATCH ?",(q,))]; con.close(); return rows
     def health(self):
-        con=self.storage.connect(); out={t:con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("sessions","tasks","events","side_effects","task_claims")}; con.close(); return {"ok":True,**out}
+        con=self.storage.connect(); out={t:con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("sessions","tasks","events","side_effects","task_claims","handoffs")}; con.close(); return {"ok":True,**out}
